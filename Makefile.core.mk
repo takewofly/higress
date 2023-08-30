@@ -24,6 +24,8 @@ RELEASE_LDFLAGS='$(GO_LDFLAGS) -extldflags -static -s -w'
 export OUT:=$(TARGET_OUT)
 export OUT_LINUX:=$(TARGET_OUT_LINUX)
 
+BUILDX_PLATFORM ?=
+
 # If tag not explicitly set in users' .istiorc.mk or command line, default to the git sha.
 TAG ?= $(shell git rev-parse --verify HEAD)
 ifeq ($(TAG),)
@@ -65,7 +67,13 @@ build: prebuild $(OUT)
 
 .PHONY: build-linux
 build-linux: prebuild $(OUT)
+ifeq ($(BUILDX_PLATFORM), true)
+	GOPROXY=$(GOPROXY) GOOS=linux GOARCH=amd64 LDFLAGS=$(RELEASE_LDFLAGS) tools/hack/gobuild.sh ./out/linux_amd64/ $(HIGRESS_BINARIES)
+	GOPROXY=$(GOPROXY) GOOS=linux GOARCH=arm64 LDFLAGS=$(RELEASE_LDFLAGS) tools/hack/gobuild.sh ./out/linux_arm64/ $(HIGRESS_BINARIES)
+else
 	GOPROXY=$(GOPROXY) GOOS=linux GOARCH=$(GOARCH_LOCAL) LDFLAGS=$(RELEASE_LDFLAGS) tools/hack/gobuild.sh $(OUT_LINUX)/ $(HIGRESS_BINARIES)
+endif
+
 
 .PHONY: build-hgctl
 build-hgctl: $(OUT)
@@ -114,6 +122,9 @@ include docker/docker.mk
 
 docker-build: docker.higress ## Build and push docker images to registry defined by $HUB and $TAG
 
+docker-build-base:
+	docker buildx build --no-cache --platform linux/amd64,linux/arm64 -t ${HUB}/base:${BASE_VERSION} -f docker/Dockerfile.base . --push
+
 export PARENT_GIT_TAG:=$(shell cat VERSION)
 export PARENT_GIT_REVISION:=$(TAG)
 
@@ -142,8 +153,8 @@ install: pre-install
 	cd helm/higress; helm dependency build
 	helm install higress helm/higress -n higress-system --create-namespace --set 'global.local=true'
 
-ENVOY_LATEST_IMAGE_TAG ?= 1.0.0
-ISTIO_LATEST_IMAGE_TAG ?= 1.0.0
+ENVOY_LATEST_IMAGE_TAG ?= 1.1.0
+ISTIO_LATEST_IMAGE_TAG ?= 1.1.0
 
 install-dev: pre-install
 	helm install higress helm/core -n higress-system --create-namespace --set 'controller.tag=$(TAG)' --set 'gateway.replicas=1' --set 'gateway.tag=$(ENVOY_LATEST_IMAGE_TAG)' --set 'global.local=true'
@@ -199,13 +210,13 @@ include tools/lint.mk
 .PHONY: gateway-conformance-test
 gateway-conformance-test:
 
-# ingress-conformance-test runs ingress api conformance tests.
-.PHONY: ingress-conformance-test
-ingress-conformance-test: $(tools/kind) delete-cluster create-cluster docker-build kube-load-image install-dev run-ingress-e2e-test delete-cluster
+# higress-conformance-test runs ingress api conformance tests.
+.PHONY: higress-conformance-test
+higress-conformance-test: $(tools/kind) delete-cluster create-cluster docker-build kube-load-image install-dev run-higress-e2e-test delete-cluster
 
-# ingress-wasmplugin-test runs ingress wasmplugin tests.
-.PHONY: ingress-wasmplugin-test
-ingress-wasmplugin-test: $(tools/kind) delete-cluster create-cluster docker-build kube-load-image install-dev-wasmplugin run-ingress-e2e-test-wasmplugin delete-cluster
+# higress-wasmplugin-test runs ingress wasmplugin tests.
+.PHONY: higress-wasmplugin-test
+higress-wasmplugin-test: $(tools/kind) delete-cluster create-cluster docker-build kube-load-image install-dev-wasmplugin run-higress-e2e-test-wasmplugin delete-cluster
 
 # create-cluster creates a kube cluster with kind.
 .PHONY: create-cluster
@@ -226,25 +237,28 @@ kube-load-image: $(tools/kind) ## Install the Higress image to a kind cluster us
 	tools/hack/kind-load-image.sh higress-registry.cn-hangzhou.cr.aliyuncs.com/higress/higress $(TAG)
 	tools/hack/docker-pull-image.sh registry.cn-hangzhou.aliyuncs.com/hinsteny/dubbo-provider-demo 0.0.1
 	tools/hack/docker-pull-image.sh registry.cn-hangzhou.aliyuncs.com/hinsteny/nacos-standlone-rc3 1.0.0-RC3
+	tools/hack/docker-pull-image.sh docker.io/hashicorp/consul 1.16.0
+	tools/hack/docker-pull-image.sh registry.cn-hangzhou.aliyuncs.com/2456868764/httpbin 1.0.2
 	tools/hack/kind-load-image.sh registry.cn-hangzhou.aliyuncs.com/hinsteny/dubbo-provider-demo 0.0.1
 	tools/hack/kind-load-image.sh registry.cn-hangzhou.aliyuncs.com/hinsteny/nacos-standlone-rc3 1.0.0-RC3
-
-# run-ingress-e2e-test starts to run ingress e2e tests.
-.PHONY: run-ingress-e2e-test
-run-ingress-e2e-test:
+	tools/hack/kind-load-image.sh docker.io/hashicorp/consul 1.16.0
+	tools/hack/kind-load-image.sh registry.cn-hangzhou.aliyuncs.com/2456868764/httpbin 1.0.2
+# run-higress-e2e-test starts to run ingress e2e tests.
+.PHONY: run-higress-e2e-test
+run-higress-e2e-test:
 	@echo -e "\n\033[36mRunning higress conformance tests...\033[0m"
 	@echo -e "\n\033[36mWaiting higress-controller to be ready...\033[0m\n"
 	kubectl wait --timeout=10m -n higress-system deployment/higress-controller --for=condition=Available
 	@echo -e "\n\033[36mWaiting higress-gateway to be ready...\033[0m\n"
 	kubectl wait --timeout=10m -n higress-system deployment/higress-gateway --for=condition=Available
-	go test -v -tags conformance ./test/ingress/e2e_test.go --ingress-class=higress --debug=true
+	go test -v -tags conformance ./test/e2e/e2e_test.go --ingress-class=higress --debug=true
 
-# run-ingress-e2e-test starts to run ingress e2e tests.
-.PHONY: run-ingress-e2e-test-wasmplugin
-run-ingress-e2e-test-wasmplugin:
+# run-higress-e2e-test starts to run ingress e2e tests.
+.PHONY: run-higress-e2e-test-wasmplugin
+run-higress-e2e-test-wasmplugin:
 	@echo -e "\n\033[36mRunning higress conformance tests...\033[0m"
 	@echo -e "\n\033[36mWaiting higress-controller to be ready...\033[0m\n"
 	kubectl wait --timeout=10m -n higress-system deployment/higress-controller --for=condition=Available
 	@echo -e "\n\033[36mWaiting higress-gateway to be ready...\033[0m\n"
 	kubectl wait --timeout=10m -n higress-system deployment/higress-gateway --for=condition=Available
-	go test -v -tags conformance ./test/ingress/e2e_test.go -isWasmPluginTest=true --ingress-class=higress --debug=true
+	go test -v -tags conformance ./test/e2e/e2e_test.go -isWasmPluginTest=true -wasmPluginType=$(PLUGIN_TYPE) -wasmPluginName=$(PLUGIN_NAME) --ingress-class=higress --debug=true
